@@ -1,22 +1,24 @@
 #!/bin/sh
-# Donkey installer. Run it on the ROCKNIX device from the unpacked release:
+# Donkey setup. Runs from Donkey's home, the unpacked release:
 #
-#   ./install.sh                   install or update Donkey; fetch Firefox if missing
-#   ./install.sh --update-firefox  also replace Firefox with Mozilla's latest
+#   tar -xzf donkey-aarch64.tar.gz -C /storage/apps
+#   /storage/apps/donkey/install.sh                   fetch Firefox if missing, add Ports > Donkey
+#   /storage/apps/donkey/install.sh --update-firefox  also replace Firefox with Mozilla's latest
 #
-# Firefox comes straight from Mozilla, unmodified; Donkey never ships it.
+# portmart runs it as the install hook (PORTMART_HOME set) and writes the
+# Ports entry itself. Firefox comes straight from Mozilla, unmodified;
+# Donkey never ships it.
 set -eu
 
-APP=/storage/apps/donkey
-PORT=/storage/roms/ports/Donkey.sh
+HOME_DIR=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+PORTS_DIR=${PORTS_DIR:-/storage/roms/ports}
 FIREFOX_URL="${DONKEY_FIREFOX_URL:-https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64-aarch64&lang=en-US}"
-SRC=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 update_firefox=0
 case "${1:-}" in
   "") ;;
   --update-firefox) update_firefox=1 ;;
-  *) sed -n '2,7s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,10s/^# \{0,1\}//p' "$0" >&2; exit 2 ;;
 esac
 
 if [ "$(uname -m)" != aarch64 ]; then
@@ -25,7 +27,7 @@ if [ "$(uname -m)" != aarch64 ]; then
 fi
 
 fetch_firefox() {
-  work=$(mktemp -d /storage/.donkey-install.XXXXXX)
+  work=$(mktemp -d "$HOME_DIR/.firefox-download.XXXXXX")
   trap 'rm -rf "$work"' EXIT
   echo "Downloading Firefox for Linux aarch64 from Mozilla..."
   curl -fL --retry 3 -o "$work/firefox.tar.xz" "$FIREFOX_URL"
@@ -35,36 +37,31 @@ fetch_firefox() {
     echo "The download did not contain firefox/firefox-bin." >&2
     exit 1
   fi
-  rm -rf "$APP/firefox"
-  mv "$work/firefox" "$APP/firefox"
+  rm -rf "$HOME_DIR/firefox"
+  mv "$work/firefox" "$HOME_DIR/firefox"
 }
 
-mkdir -p "$APP/logs" "$(dirname "$PORT")"
-if [ "$update_firefox" = 1 ] || [ ! -x "$APP/firefox/firefox" ]; then
+mkdir -p "$HOME_DIR/logs"
+if [ "$update_firefox" = 1 ] || [ ! -x "$HOME_DIR/firefox/firefox" ]; then
   fetch_firefox
 fi
+chmod +x "$HOME_DIR"/*.sh "$HOME_DIR"/bin/*
 
-# Donkey's own files: replaced wholesale, so removed files don't linger.
-rm -rf "$APP/bin" "$APP/controller" "$APP/profile"
-cp -R "$SRC/app/." "$APP/"
-cp -R "$SRC/bin" "$APP/bin"
-cp "$SRC/VERSION" "$APP/VERSION"
-chmod +x "$APP"/*.sh "$APP"/bin/*
-
-cat >"$PORT" <<EOF
-#!/bin/sh
-exec $APP/launch.sh "\$@"
-EOF
-chmod +x "$PORT"
-
-missing=$( (LD_LIBRARY_PATH="$APP/firefox" ldd "$APP/firefox/libxul.so"
-  ldd "$APP/bin/wvkbd-donkey") 2>&1 | grep 'not found' || true)
+missing=$( (LD_LIBRARY_PATH="$HOME_DIR/firefox" ldd "$HOME_DIR/firefox/libxul.so"
+  ldd "$HOME_DIR/bin/wvkbd-donkey") 2>&1 | grep 'not found' || true)
 if [ -n "$missing" ]; then
   echo "Missing libraries:" >&2
   echo "$missing" >&2
   exit 1
 fi
 
-version=$(sed -n 's/^Version=//p' "$APP/firefox/application.ini" | head -n 1)
-echo "Donkey $(cat "$APP/VERSION") installed with Firefox $version."
-echo "In EmulationStation: Start > Game Settings > Update Gamelists, then Ports > Donkey."
+if [ -z "${PORTMART_HOME:-}" ]; then
+  mkdir -p "$PORTS_DIR"
+  printf '#!/bin/sh\nexec "%s/launch.sh" "$@"\n' "$HOME_DIR" >"$PORTS_DIR/Donkey.sh"
+  chmod +x "$PORTS_DIR/Donkey.sh"
+fi
+
+version=$(sed -n 's/^Version=//p' "$HOME_DIR/firefox/application.ini" | head -n 1)
+echo "Donkey $(cat "$HOME_DIR/VERSION") ready with Firefox $version in $HOME_DIR."
+[ -n "${PORTMART_HOME:-}" ] ||
+  echo "In EmulationStation: Start > Game Settings > Update Gamelists, then Ports > Donkey."

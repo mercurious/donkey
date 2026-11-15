@@ -2,16 +2,37 @@
 # Donkey launcher: runs Mozilla's Firefox build as a handheld browser under
 # ROCKNIX's Sway session, with Donkey's keyboard and controller layout.
 # Everything Donkey changes on the way in is put back on the way out.
+#
+# Arguments go to Firefox (e.g. --kiosk URL). Apps that run inside Donkey
+# set these:
+#   DONKEY_PROFILE=<name>   own Firefox profile, /storage/.mozilla/donkey-<name>;
+#                           starts blank (no session restore) at scale 1.0
+#   DONKEY_CONTROLLER=<yaml> InputPlumber profile for the whole session; the
+#                           keyboard then no longer swaps controller layouts
+#   DONKEY_SCALE=<n>        layout.css.devPixelsPerPx (default 2.0, apps 1.0)
+#   DONKEY_PREFS=<file>     extra user_pref lines appended to the profile
 
 . /etc/profile
 
-APP=/storage/apps/donkey
+APP=$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 FIREFOX="$APP/firefox/firefox"
-PROFILE=/storage/.mozilla/donkey
 RUN=/run/donkey
 FIFO="$RUN/keyboard"
 LOG="$APP/logs/donkey.log"
 WORKSPACE="97:donkey"
+
+case "${DONKEY_PROFILE:-}" in
+  "") PROFILE=/storage/.mozilla/donkey SCALE=${DONKEY_SCALE:-2.0} ;;
+  *[!a-z0-9._-]* | [._-]*)
+    echo "Donkey: bad DONKEY_PROFILE '$DONKEY_PROFILE'" >&2
+    exit 2
+    ;;
+  *) PROFILE=/storage/.mozilla/donkey-$DONKEY_PROFILE SCALE=${DONKEY_SCALE:-1.0} ;;
+esac
+case "$SCALE" in
+  *[!0-9.]* | "" | .*) echo "Donkey: bad DONKEY_SCALE '$SCALE'" >&2; exit 2 ;;
+esac
+PAD_LAYOUT=${DONKEY_CONTROLLER:-$APP/controller/browse.yaml}
 
 # Keycodes Sway sees for the function keys the controller profiles send
 # (evdev code + 8). F13-F17, F19 and F21 only reach Sway while the keyboard
@@ -26,7 +47,14 @@ TOUCHKB_WAS_ACTIVE=0
 PAD_PROFILE_LOADED=0
 
 if [ ! -x "$FIREFOX" ]; then
-  echo "Donkey: Firefox is missing from $APP/firefox. Run install.sh." >&2
+  echo "Donkey: Firefox is missing from $APP/firefox. Run $APP/install.sh." >&2
+  exit 1
+fi
+# One session at a time: a second one would share the keyboard, the Sway
+# bindings and the controller, and its cleanup would tear down the first.
+if pid=$(cat "$RUN/firefox.pid" 2>/dev/null) && [ -n "$pid" ] &&
+  kill -0 "$pid" 2>/dev/null; then
+  echo "Donkey is already running (pid $pid); leave it first (Home)." >&2
   exit 1
 fi
 
@@ -34,7 +62,7 @@ mkdir -p "$APP/logs" "$RUN" "$PROFILE/chrome" \
   /storage/.cache /storage/.config /storage/.local/share
 exec >>"$LOG" 2>&1
 echo
-echo "== Donkey $(cat "$APP/VERSION" 2>/dev/null) $(date '+%F %T')"
+echo "== Donkey $(cat "$APP/VERSION" 2>/dev/null) $(date '+%F %T') profile=$PROFILE scale=$SCALE pad=$PAD_LAYOUT"
 
 # Launched from EmulationStation these are already set; over SSH they are
 # not, so find the running session.
@@ -68,10 +96,12 @@ gtk-query-immodules-3.0 /usr/lib/gtk-3.0/3.0.0/immodules/im-wayland.so \
 export GTK_IM_MODULE_FILE="$RUN/immodules.cache"
 export GTK_IM_MODULE=wayland
 
-# The composite controller InputPlumber manages; the keyboard hook needs it.
+# The composite controller InputPlumber manages; the keyboard hook needs it,
+# and needs to know whether the controller layout is Donkey's to swap.
 DONKEY_PAD=$(busctl tree org.shadowblip.InputPlumber 2>/dev/null |
   grep -o '/org/shadowblip/InputPlumber/CompositeDevice[0-9]*' | head -n 1)
-export DONKEY_PAD
+DONKEY_APP=$APP
+export DONKEY_PAD DONKEY_APP DONKEY_CONTROLLER
 
 load_pad_profile() {
   [ -n "$DONKEY_PAD" ] || return 1
@@ -142,13 +172,23 @@ trap cleanup EXIT
 trap on_signal INT TERM HUP
 
 # Donkey's defaults go back into the profile on every launch.
-cp "$APP/profile/user.js" "$PROFILE/user.js"
+{
+  grep -v 'layout.css.devPixelsPerPx' "$APP/profile/user.js"
+  echo "user_pref(\"layout.css.devPixelsPerPx\", \"$SCALE\");"
+  if [ -n "${DONKEY_PROFILE:-}" ]; then
+    # An app opens its own page every time; restoring the last session
+    # would pile up copies of it.
+    echo 'user_pref("browser.startup.page", 0);'
+    echo 'user_pref("browser.sessionstore.resume_from_crash", false);'
+  fi
+  [ -n "${DONKEY_PREFS:-}" ] && cat "$DONKEY_PREFS"
+} >"$PROFILE/user.js"
 cp "$APP/profile/chrome/userChrome.css" "$PROFILE/chrome/userChrome.css"
 
 # ROCKNIX's global exit chord (L1 + Select + Start) also closes Donkey.
 command -v set_kill >/dev/null && set_kill set "firefox firefox-bin"
 
-load_pad_profile "$APP/controller/browse.yaml" && PAD_PROFILE_LOADED=1
+load_pad_profile "$PAD_LAYOUT" && PAD_PROFILE_LOADED=1
 start_keyboard
 bind_keys
 
@@ -168,9 +208,6 @@ while [ "$tries" -lt 20 ] && kill -0 "$FIREFOX_PID" 2>/dev/null; do
     swaymsg -q "[app_id=\"Donkey\"] move container to workspace $WORKSPACE"
     swaymsg -q "workspace $WORKSPACE"
     swaymsg -q '[app_id="Donkey"] focus, fullscreen disable'
-    # A restored session can bring back several windows; tab them instead
-    # of splitting a 5.5-inch screen between them.
-    swaymsg -q layout tabbed
     break
   fi
   tries=$((tries + 1))

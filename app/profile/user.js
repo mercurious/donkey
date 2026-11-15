@@ -1,5 +1,5 @@
-// Donkey's Firefox settings. launch.sh copies this file into the profile on
-// every start, so edit /storage/apps/donkey/profile/user.js, not the copy.
+// Donkey's Firefox settings. launch.sh writes them into the profile on
+// every start, so edit profile/user.js in Donkey's home, not the copy.
 
 // Size: the Retroid Pocket Flip 2 packs 1920x1080 into 5.5 inches (~400 ppi).
 // Twice the desktop pixel ratio, plus touch density for the toolbar, makes
