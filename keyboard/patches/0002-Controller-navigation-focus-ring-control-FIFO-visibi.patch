@@ -1,0 +1,559 @@
+From 39c194d6e3d9dd0e7a5396128a58e72b7993baaf Mon Sep 17 00:00:00 2001
+From: mercurious <96538+mercurious@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 18:26:49 -0500
+Subject: [PATCH 2/2] Controller navigation: focus ring, control FIFO,
+ visibility hook
+
+---
+ keyboard.c | 257 ++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ keyboard.h |  11 +++
+ main.c     | 144 +++++++++++++++++++++++++++++-
+ 3 files changed, 408 insertions(+), 4 deletions(-)
+
+diff --git a/keyboard.c b/keyboard.c
+index ea3be7e..12efc5a 100644
+--- a/keyboard.c
++++ b/keyboard.c
+@@ -2,6 +2,7 @@
+ #include <linux/input-event-codes.h>
+ #include <stddef.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <sys/mman.h>
+ #include <ctype.h>
+ #include <time.h>
+@@ -414,9 +415,252 @@ kbd_motion_key(struct kbd *kb, uint32_t time, uint32_t x, uint32_t y)
+     kbd_clear_last_popup(kb);
+ }
+ 
++/* Width of the controller focus ring, in surface pixels. */
++#define KBD_FOCUS_RING 5
++
++static bool
++kbd_key_focusable(const struct key *k)
++{
++    return (k->type != Pad) && (k->type != EndRow) && (k->type != Last) &&
++           (k->w > 0);
++}
++
++static bool
++kbd_layout_has_key(const struct layout *l, const struct key *k)
++{
++    if (!k)
++        return false;
++    for (const struct key *it = l->keys; it->type != Last; it++) {
++        if (it == k)
++            return true;
++    }
++    return false;
++}
++
++static int32_t
++kbd_key_cx(const struct key *k)
++{
++    return (int32_t)(k->x + k->w / 2);
++}
++
++static int32_t
++kbd_key_cy(const struct key *k)
++{
++    return (int32_t)(k->y + k->h / 2);
++}
++
++/* The focusable key in the current layout whose centre is nearest (x, y). */
++static struct key *
++kbd_nearest_key(struct kbd *kb, int32_t x, int32_t y)
++{
++    struct key *best = NULL;
++    int64_t best_d = 0;
++    for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++        if (!kbd_key_focusable(k))
++            continue;
++        int64_t dx = kbd_key_cx(k) - x, dy = kbd_key_cy(k) - y;
++        int64_t d = dx * dx + dy * dy;
++        if (!best || d < best_d) {
++            best = k;
++            best_d = d;
++        }
++    }
++    return best;
++}
++
++/* Draw a key in its resting state: pressed look for latched modifiers,
++ * plain otherwise. kbd_draw_key adds the ring when it is the focus. */
++static void
++kbd_redraw_key(struct kbd *kb, struct key *k)
++{
++    if ((k->type == Mod && (kb->mods & k->code)) ||
++        (k->type == Compose && kb->compose)) {
++        kbd_draw_key(kb, k, Press);
++    } else {
++        kbd_draw_key(kb, k, None);
++    }
++}
++
++static void
++kbd_set_focus(struct kbd *kb, struct key *k)
++{
++    struct key *old = kb->focus;
++    kb->focus = k;
++    if (old && old != k && kbd_layout_has_key(kb->layout, old))
++        kbd_redraw_key(kb, old);
++    if (k)
++        kbd_redraw_key(kb, k);
++}
++
++/* Keep the ring on the current layout after a layer switch or resize: land
++ * on whatever key now sits where the ring was. */
++static void
++kbd_focus_follow(struct kbd *kb)
++{
++    if (!kb->focus || kbd_layout_has_key(kb->layout, kb->focus))
++        return;
++    kb->focus = kbd_nearest_key(kb, kbd_key_cx(kb->focus),
++                                kbd_key_cy(kb->focus));
++    if (kb->focus)
++        kb->focus_column = kbd_key_cx(kb->focus);
++}
++
++void
++kbd_focus_reset(struct kbd *kb)
++{
++    /* Start in the middle of the letters, where most words begin. */
++    struct key *k = kbd_nearest_key(kb, kb->w / 2, kb->h / 2);
++    if (k)
++        kb->focus_column = kbd_key_cx(k);
++    kbd_set_focus(kb, k);
++}
++
++void
++kbd_focus_move(struct kbd *kb, int dx, int dy)
++{
++    struct key *f = kb->focus;
++    if (!kbd_layout_has_key(kb->layout, f)) {
++        kbd_focus_reset(kb);
++        return;
++    }
++    int32_t fx = kbd_key_cx(f);
++    struct key *best = NULL;
++    int64_t best_score = 0;
++
++    if (dx) {
++        /* Along the row; past the end wraps to the other end. */
++        for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++            if (!kbd_key_focusable(k) || k == f || k->y != f->y)
++                continue;
++            int64_t d = (int64_t)(kbd_key_cx(k) - fx) * dx;
++            if (d > 0 && (!best || d < best_score)) {
++                best = k;
++                best_score = d;
++            }
++        }
++        if (!best) {
++            for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++                if (!kbd_key_focusable(k) || k == f || k->y != f->y)
++                    continue;
++                int64_t d = (int64_t)(fx - kbd_key_cx(k)) * dx;
++                if (d > 0 && (!best || d > best_score)) {
++                    best = k;
++                    best_score = d;
++                }
++            }
++        }
++        if (best)
++            kb->focus_column = kbd_key_cx(best);
++    } else if (dy) {
++        /* Pick the next row in that direction (wrapping), then the key in
++         * it under the remembered column, so a trip through the wide space
++         * bar comes back to the same letter. */
++        bool found = false;
++        uint32_t row_y = 0;
++        int64_t row_d = 0;
++        for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++            if (!kbd_key_focusable(k))
++                continue;
++            int64_t d = ((int64_t)k->y - f->y) * dy;
++            if (d > 0 && (!found || d < row_d)) {
++                found = true;
++                row_y = k->y;
++                row_d = d;
++            }
++        }
++        if (!found) {
++            for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++                if (!kbd_key_focusable(k))
++                    continue;
++                int64_t d = ((int64_t)f->y - k->y) * dy;
++                if (d > 0 && (!found || d > row_d)) {
++                    found = true;
++                    row_y = k->y;
++                    row_d = d;
++                }
++            }
++        }
++        if (found) {
++            int32_t col = kb->focus_column;
++            for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++                if (!kbd_key_focusable(k) || k->y != row_y)
++                    continue;
++                if (col >= (int32_t)k->x && col < (int32_t)(k->x + k->w)) {
++                    best = k;
++                    break;
++                }
++                int64_t d = llabs((int64_t)kbd_key_cx(k) - col);
++                if (!best || d < best_score) {
++                    best = k;
++                    best_score = d;
++                }
++            }
++        }
++    }
++
++    if (best)
++        kbd_set_focus(kb, best);
++}
++
++void
++kbd_focus_press(struct kbd *kb)
++{
++    if (!kbd_layout_has_key(kb->layout, kb->focus)) {
++        kbd_focus_reset(kb);
++        return;
++    }
++    uint32_t time = (uint32_t)monotime();
++    kbd_unpress_key(kb, time);
++    kbd_press_key(kb, kb->focus, time);
++    kbd_release_key(kb, time);
++    /* A layer key may have swapped the layout under the ring. */
++    if (!kbd_layout_has_key(kb->layout, kb->focus)) {
++        kbd_focus_follow(kb);
++        kbd_draw_layout(kb);
++    } else {
++        kbd_redraw_key(kb, kb->focus);
++    }
++}
++
++void
++kbd_tap_code(struct kbd *kb, uint32_t code)
++{
++    uint32_t time = (uint32_t)monotime();
++    zwp_virtual_keyboard_v1_modifiers(kb->vkbd, kb->mods, 0, 0, 0);
++    zwp_virtual_keyboard_v1_key(kb->vkbd, time, code,
++                                WL_KEYBOARD_KEY_STATE_PRESSED);
++    zwp_virtual_keyboard_v1_key(kb->vkbd, time, code,
++                                WL_KEYBOARD_KEY_STATE_RELEASED);
++}
++
++void
++kbd_toggle_mod(struct kbd *kb, uint32_t mod)
++{
++    /* Press the layout's own key for that modifier so latching and the
++     * shifted labels behave exactly as a tap on it would. */
++    for (struct key *k = kb->layout->keys; k->type != Last; k++) {
++        if (k->type == Mod && k->code == mod) {
++            uint32_t time = (uint32_t)monotime();
++            kbd_press_key(kb, k, time);
++            kbd_release_key(kb, time);
++            return;
++        }
++    }
++}
++
+ void
+ kbd_press_key(struct kbd *kb, struct key *k, uint32_t time)
+ {
++    /* Once the controller has shown the ring, a tap moves it too, so the
++     * two input methods never disagree about where you are. */
++    if (kb->focus && k != kb->focus && kbd_layout_has_key(kb->layout, k)) {
++        struct key *old = kb->focus;
++        kb->focus = k;
++        kb->focus_column = kbd_key_cx(k);
++        if (kbd_layout_has_key(kb->layout, old))
++            kbd_redraw_key(kb, old);
++    }
++
+     if ((kb->compose == 1) && (k->type != Compose) && (k->type != Mod)) {
+         if ((k->type == NextLayer) || (k->type == BackLayer) ||
+             ((k->type == Code) && (k->code == KEY_SPACE))) {
+@@ -653,8 +897,16 @@ kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type type)
+     switch (type) {
+     case None:
+     case Unpress:
+-        draw_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
+-                   scheme->fg, scheme->rounding);
++        if (k == kb->focus) {
++            draw_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
++                       kb->focus_color, scheme->rounding);
++            draw_inset(kb->surf, k->x, k->y, k->w, k->h,
++                       KBD_KEY_BORDER + KBD_FOCUS_RING, scheme->fg,
++                       scheme->rounding);
++        } else {
++            draw_inset(kb->surf, k->x, k->y, k->w, k->h, KBD_KEY_BORDER,
++                       scheme->fg, scheme->rounding);
++        }
+         drw_draw_text(kb->surf, scheme->text, k->x, k->y, k->w, k->h,
+                   KBD_KEY_BORDER, label, scheme->font_description);
+         break;
+@@ -704,6 +956,7 @@ void
+ kbd_draw_layout(struct kbd *kb)
+ {
+     struct drwsurf *d = kb->surf;
++    kbd_focus_follow(kb);
+     struct key *next_key = kb->layout->keys;
+     if (kb->debug)
+         fprintf(stderr, "Draw layout\n");
+diff --git a/keyboard.h b/keyboard.h
+index f1cf4c0..c7f1da2 100644
+--- a/keyboard.h
++++ b/keyboard.h
+@@ -101,6 +101,12 @@ struct kbd {
+ 	struct layout *layout;
+ 	struct clr_scheme *schemes;
+ 
++	/* Controller navigation: the key under the focus ring, the column the
++	 * ring is trying to stay in across rows, and the ring's colour. */
++	struct key *focus;
++	int32_t focus_column;
++	Color focus_color;
++
+ 	bool print;
+ 	bool print_intersect;
+ 	uint32_t w, h;
+@@ -151,6 +157,11 @@ void kbd_print_first_utf8_char_stdout(const char *str);
+ void kbd_clear_last_popup(struct kbd *kb);
+ void kbd_draw_key(struct kbd *kb, struct key *k, enum key_draw_type);
+ void kbd_draw_layout(struct kbd *kb);
++void kbd_focus_reset(struct kbd *kb);
++void kbd_focus_move(struct kbd *kb, int dx, int dy);
++void kbd_focus_press(struct kbd *kb);
++void kbd_tap_code(struct kbd *kb, uint32_t code);
++void kbd_toggle_mod(struct kbd *kb, uint32_t mod);
+ void kbd_resize(struct kbd *kb, struct layout *layouts, uint8_t layoutcount);
+ uint8_t kbd_get_rows(struct layout *l);
+ double kbd_get_row_length(struct key *k);
+diff --git a/main.c b/main.c
+index be7fb07..1d15541 100644
+--- a/main.c
++++ b/main.c
+@@ -16,6 +16,9 @@
+ #include <wayland-client-protocol.h>
+ #include <wayland-client.h>
+ #include <wchar.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <sys/stat.h>
+ 
+ #include "keyboard.h"
+ #include "config.h"
+@@ -80,6 +83,10 @@ static enum { DOCK_FULL = 0, DOCK_LEFT = 1, DOCK_RIGHT = 2 } dock_mode = DOCK_FU
+ static uint8_t bg_alpha = 0;
+ static bool bg_alpha_defined = false;
+ static int corner_radius = -1;
++/* Donkey: a FIFO of line commands for controller navigation, and a command
++ * run with "show" or "hide" whenever visibility changes. */
++static char *control_path = NULL;
++static char *hook_cmd = NULL;
+ 
+ 
+ 
+@@ -688,6 +695,9 @@ usage(char *argv0)
+         stderr,
+         "  --alpha [int]          - Set alpha value for all colors [0-255]\n");
+     fprintf(stderr, "  --auto                 - Automatically toggle visibility based on focus\n");
++    fprintf(stderr, "  --control [path]       - Read navigation commands from a FIFO at path\n");
++    fprintf(stderr, "  --hook [command]       - Run 'command show|hide' when visibility changes\n");
++    fprintf(stderr, "  --focus [rrggbb|aa]    - Set color of the controller focus ring\n");
+     fprintf(stderr, "  --bg [rrggbb|aa]       - Set color of background\n");
+     fprintf(stderr, "  --fg [rrggbb|aa]       - Set color of keys\n");
+     fprintf(stderr, "  --fg-sp [rrggbb|aa]    - Set color of special keys\n");
+@@ -799,6 +809,7 @@ show()
+ 
+     refresh_available_dimension();
+     redimension_keyboard();
++    keyboard.focus = NULL;
+ 
+     draw_surf.surf = wl_compositor_create_surface(compositor);
+     wl_surface_add_listener(
+@@ -849,6 +860,87 @@ toggle_visibility()
+         hide();
+ }
+ 
++static void
++run_hook(const char *event)
++{
++    pid_t pid = fork();
++    if (pid == 0) {
++        execl("/bin/sh", "sh", "-c", "exec $0 \"$1\"", hook_cmd, event,
++              (char *)NULL);
++        _exit(127);
++    }
++    if (pid == -1)
++        fprintf(stderr, "wvkbd: hook fork failed: %d\n", errno);
++}
++
++static void
++control_command(const char *cmd)
++{
++    if (!strcmp(cmd, "show")) {
++        show();
++        return;
++    }
++    if (!strcmp(cmd, "hide")) {
++        hide();
++        return;
++    }
++    if (!strcmp(cmd, "toggle")) {
++        toggle_visibility();
++        return;
++    }
++    if (hidden || !layer_surface_configured)
++        return;
++
++    if (!strcmp(cmd, "up"))
++        kbd_focus_move(&keyboard, 0, -1);
++    else if (!strcmp(cmd, "down"))
++        kbd_focus_move(&keyboard, 0, 1);
++    else if (!strcmp(cmd, "left"))
++        kbd_focus_move(&keyboard, -1, 0);
++    else if (!strcmp(cmd, "right"))
++        kbd_focus_move(&keyboard, 1, 0);
++    else if (!strcmp(cmd, "press"))
++        kbd_focus_press(&keyboard);
++    else if (!strcmp(cmd, "shift"))
++        kbd_toggle_mod(&keyboard, Shift);
++    else if (!strcmp(cmd, "layer"))
++        kbd_next_layer(&keyboard, NULL, false);
++    else if (!strcmp(cmd, "backspace"))
++        kbd_tap_code(&keyboard, KEY_BACKSPACE);
++    else if (!strcmp(cmd, "enter"))
++        kbd_tap_code(&keyboard, KEY_ENTER);
++    else if (!strcmp(cmd, "space"))
++        kbd_tap_code(&keyboard, KEY_SPACE);
++    else if (!strcmp(cmd, "cursor-left"))
++        kbd_tap_code(&keyboard, KEY_LEFT);
++    else if (!strcmp(cmd, "cursor-right"))
++        kbd_tap_code(&keyboard, KEY_RIGHT);
++    else
++        fprintf(stderr, "wvkbd: unknown control command '%s'\n", cmd);
++}
++
++static void
++control_read(int fd)
++{
++    static char buf[256];
++    static size_t len = 0;
++    ssize_t n;
++    while ((n = read(fd, buf + len, sizeof(buf) - 1 - len)) > 0) {
++        len += n;
++        char *start = buf, *nl;
++        while ((nl = memchr(start, '\n', buf + len - start))) {
++            *nl = '\0';
++            if (nl > start)
++                control_command(start);
++            start = nl + 1;
++        }
++        len = buf + len - start;
++        memmove(buf, start, len);
++        if (len == sizeof(buf) - 1)
++            len = 0; // an over-long line: drop it
++    }
++}
++
+ void
+ pipewarn()
+ {
+@@ -925,6 +1017,7 @@ main(int argc, char **argv)
+     keyboard.corner_radius = 0;
+     keyboard.show_popup = true;
+     keyboard.show_highlight = true;
++    keyboard.focus_color.color = 0xff00ddff; // ARGB: Firefox's focus cyan
+ 
+     uint8_t alpha = 0;
+     bool alpha_defined = false;
+@@ -1110,6 +1203,24 @@ main(int argc, char **argv)
+         } else if ((!strcmp(argv[i], "-auto")) ||
+                    (!strcmp(argv[i], "--auto"))) {
+             im_auto = true;
++        } else if (!strcmp(argv[i], "--control")) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            control_path = argv[++i];
++        } else if (!strcmp(argv[i], "--hook")) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            hook_cmd = argv[++i];
++        } else if (!strcmp(argv[i], "--focus")) {
++            if (i >= argc - 1) {
++                usage(argv[0]);
++                exit(1);
++            }
++            set_kbd_colors(keyboard.focus_color.bgra, argv[++i]);
+         } else if ((!strcmp(argv[i], "-wayland-layer")) ||
+                    (!strcmp(argv[i], "--wayland-layer"))) {
+             if (i >= argc - 1) {
+@@ -1271,7 +1382,7 @@ main(int argc, char **argv)
+     if (!hidden)
+         show();
+ 
+-    struct pollfd fds[2];
++    struct pollfd fds[3];
+     int WAYLAND_FD = 0;
+     int SIGNAL_FD = 1;
+     fds[WAYLAND_FD].events = POLLIN;
+@@ -1297,9 +1408,27 @@ main(int argc, char **argv)
+         die("Failed to get signalfd: %d\n", errno);
+     }
+ 
++    int CONTROL_FD = 2;
++    fds[CONTROL_FD].events = POLLIN;
++    fds[CONTROL_FD].fd = -1;
++    if (control_path) {
++        unlink(control_path);
++        if (mkfifo(control_path, 0600) == -1) {
++            die("Failed to create control FIFO %s: %d\n", control_path, errno);
++        }
++        // Read-write so the FIFO never reports end-of-file between writers.
++        fds[CONTROL_FD].fd = open(control_path, O_RDWR | O_NONBLOCK);
++        if (fds[CONTROL_FD].fd == -1) {
++            die("Failed to open control FIFO %s: %d\n", control_path, errno);
++        }
++    }
++    if (hook_cmd)
++        signal(SIGCHLD, SIG_IGN); // hooks are fire-and-forget; reap them
++    bool hook_hidden = hidden;
++
+     while (run_display) {
+         wl_display_flush(display);
+-        poll(fds, 2, -1);
++        poll(fds, 3, -1);
+ 
+         if (fds[WAYLAND_FD].revents & POLLIN)
+             wl_display_dispatch(display);
+@@ -1324,6 +1453,14 @@ main(int argc, char **argv)
+             else if (si.ssi_signo == SIGPIPE)
+                 pipewarn();
+         }
++
++        if (fds[CONTROL_FD].fd != -1 && (fds[CONTROL_FD].revents & POLLIN))
++            control_read(fds[CONTROL_FD].fd);
++
++        if (hook_cmd && hook_hidden != hidden) {
++            hook_hidden = hidden;
++            run_hook(hidden ? "hide" : "show");
++        }
+     }
+ 
+     if (fc_font_pattern) {
+@@ -1332,5 +1469,8 @@ main(int argc, char **argv)
+             schemes[i].font = NULL;
+     }
+ 
++    if (control_path)
++        unlink(control_path);
++
+     return 0;
+ }

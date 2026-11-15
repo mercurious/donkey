@@ -1,0 +1,38 @@
+/* Donkey: browser chrome for a 5.5-inch 1080p handheld.
+ * Applied on top of devPixelsPerPx 2 and touch density from user.js. */
+
+/* Things a handheld has no use for: window buttons (Sway manages the
+ * window), account sign-in, the VPN promotion, the sidebar toggle. */
+.titlebar-buttonbox-container,
+#fxa-toolbar-menu-button,
+#ipprotection-button,
+#sidebar-button {
+  display: none !important;
+}
+
+/* Larger address text: it is the one thing you read on every page. */
+#urlbar-input {
+  font-size: 1.15em !important;
+}
+
+/* Tabs: readable titles and a wider minimum, so a few tabs stay tappable. */
+.tabbrowser-tab {
+  font-size: 1.1em !important;
+  min-width: 140px !important;
+}
+
+/* Results under the address bar: bigger rows for thumbs. */
+.urlbarView-row {
+  padding-block: 6px !important;
+}
+.urlbarView-title,
+.urlbarView-url {
+  font-size: 1.1em !important;
+}
+
+/* Menus and context menus open from the controller's L2 as often as from a
+ * tap; give their items finger-sized rows. */
+menupopup > menuitem,
+menupopup > menu {
+  min-height: 2.4em !important;
+}

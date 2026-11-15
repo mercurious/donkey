@@ -1,0 +1,8 @@
+# Build environment for wvkbd-donkey. Fedora 45 ships glibc 2.44 and
+# pango 1.58, the same as current ROCKNIX, so the binary runs there as-is.
+# Bump this only together with a ROCKNIX glibc check (see build.sh).
+FROM registry.fedoraproject.org/fedora:45
+RUN dnf -y install --setopt=install_weak_deps=False \
+      gcc make git pkgconf-pkg-config \
+      wayland-devel libxkbcommon-devel pango-devel cairo-devel \
+    && dnf clean all
