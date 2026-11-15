@@ -27,7 +27,8 @@ keyboard/build.sh        # -> build/bin/wvkbd-donkey
 
 ## License
 
-wvkbd is GPL-3.0-or-later, and so are Donkey's patches to it; see `COPYING`
-in this directory. The rest of Donkey is MPL-2.0. Each binary release ships
+wvkbd is GPL-3.0, and so are Donkey's patches to it. `COPYING` gives
+upstream's licensing terms, with the full text in `LICENSE` and
+`COPYING_WESTON`. The rest of Donkey is MPL-2.0. Each binary release ships
 `wvkbd-donkey` together with this directory, which is its complete
 corresponding source: the upstream tag plus these patches.
