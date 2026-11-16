@@ -1,5 +1,7 @@
 # Donkey
 
+![Donkey](art/banner.png)
+
 **Don**'t have a **key**board? Donkey sets up the Firefox web browser for
 ROCKNIX handhelds. You get a dark on-screen keyboard you can type on with
 the D-pad and face buttons, a toolbar big enough to read and tap, and a
@@ -80,6 +82,7 @@ keyboard/build.sh            # wvkbd-donkey, needs an aarch64 host with podman
 tools/package.sh             # dist/donkey-aarch64.tar.gz (+ .sha256): Donkey's home
 tools/deploy.sh              # package and install over SSH (DONKEY_HOST, DONKEY_KEY)
 tools/smoke.sh               # on-device end-to-end test (DONKEY_HOST, DONKEY_KEY)
+node art/render.mjs         # icon + banner: voxel head meshed by VOXEL GT's engine (VOXEL_GT=<checkout>)
 ```
 
 ## License
