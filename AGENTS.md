@@ -29,9 +29,10 @@ account: switch back to `mercurious` without commentary.
 ROCKNIX is not garden-variety Linux: BusyBox, a read-only system, and root
 as the only user. Check your assumptions on the device.
 `mercurious/etk` has detailed ROCKNIX docs and tools.
-- **Dev device:** Retroid Pocket Flip 2, `root@sm8250-12gb.local`, key
-  `~/.ssh/etk_rig`. The screen is 1920x1080 landscape (DSI-1, transform
-  270) at scale 1.
+- **Dev device:** Retroid Pocket Flip 2, ssh alias `flip2-12g`
+  (`root@sm8250-12gb.local`, key `~/.ssh/etk_rig`). The screen is 1920x1080
+  landscape (DSI-1, transform 270) at scale 1. Donkey is installed there
+  through portmart at `/storage/apps/donkey`.
 - **Session:** Sway 1.11. `XDG_RUNTIME_DIR=/run/0-runtime-dir`,
   `WAYLAND_DISPLAY=wayland-1`, socket `sway-ipc.0.sock`. SSH sessions don't
   source `/etc/profile`; set these yourself.
