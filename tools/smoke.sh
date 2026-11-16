@@ -77,7 +77,11 @@ while [ $i -lt 30 ] && donkey_up; do sleep 0.5; i=$((i + 1)); done
 sleep 3
 check "window closed" "$(donkey_up && echo yes || echo no)" no
 check "keyboard stopped" "$(pidof wvkbd-donkey || echo none)" none
+check "browser stopped" "$(pgrep -f /storage/apps/donkey/firefox/ >/dev/null && echo running || echo stopped)" stopped
 check "workspace restored" "$(swaymsg -t get_workspaces -r | jq -r '.[] | select(.focused) | .name')" "$start_ws"
+# InputPlumber takes a moment to come back after Donkey restarts it.
+i=0
+while [ $i -lt 20 ] && [ "$(profile)" != "$start_profile" ]; do sleep 0.5; i=$((i + 1)); done
 check "controller restored" "$(profile)" "$start_profile"
 echo "failures: $fails"
 EOF

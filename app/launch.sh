@@ -42,6 +42,7 @@ KEY_F19=197 KEY_F21=199 KEY_F23=201 KEY_F24=202
 
 FIREFOX_PID=""
 KEYBOARD_PID=""
+WATCH_PID=""
 PRIOR_WORKSPACE=""
 TOUCHKB_WAS_ACTIVE=0
 PAD_PROFILE_LOADED=0
@@ -146,10 +147,30 @@ start_keyboard() {
   KEYBOARD_PID=$!
 }
 
+# One window fills the screen. Two or more (a restored session, a sign-in
+# popup) become Sway tabs instead of splitting a 5.5-inch screen; only then
+# is the tab bar worth its height.
+arrange_windows() {
+  n=$(swaymsg -t get_tree | jq '[.. | objects | select(.app_id? == "Donkey")] | length')
+  if [ "$n" -gt 1 ]; then layout=tabbed; else layout=splith; fi
+  swaymsg -q "[app_id=\"Donkey\"] layout $layout"
+}
+
+watch_windows() {
+  swaymsg -m -r -t subscribe '["window"]' | while read -r event; do
+    case "$event" in
+      *'"change": "new"'* | *'"change": "close"'* | *'"change": "focus"'*) arrange_windows ;;
+    esac
+  done
+}
+
 cleanup() {
   trap - EXIT INT TERM HUP
   unbind_keys
   rm -f "$RUN/firefox.pid"
+  if [ -n "$WATCH_PID" ]; then
+    { pkill -P "$WATCH_PID"; kill "$WATCH_PID"; wait "$WATCH_PID"; } 2>/dev/null
+  fi
   if [ -n "$KEYBOARD_PID" ]; then
     kill "$KEYBOARD_PID" 2>/dev/null
     wait "$KEYBOARD_PID" 2>/dev/null
@@ -208,6 +229,9 @@ while [ "$tries" -lt 20 ] && kill -0 "$FIREFOX_PID" 2>/dev/null; do
     swaymsg -q "[app_id=\"Donkey\"] move container to workspace $WORKSPACE"
     swaymsg -q "workspace $WORKSPACE"
     swaymsg -q '[app_id="Donkey"] focus, fullscreen disable'
+    watch_windows 2>/dev/null &
+    WATCH_PID=$!
+    arrange_windows
     break
   fi
   tries=$((tries + 1))
@@ -215,3 +239,25 @@ while [ "$tries" -lt 20 ] && kill -0 "$FIREFOX_PID" 2>/dev/null; do
 done
 
 wait "$FIREFOX_PID"
+
+# Firefox sometimes restarts itself (to finish an update, after a crash) as
+# a new, detached process on the same profile. Follow it through the
+# profile's lock (a symlink to "<ip>:+<pid>"), or cleanup would run under a
+# browser that is still open. The new process takes the lock within a moment
+# of the old one leaving, so look for two seconds before calling it closed.
+looks=0
+while [ "$looks" -lt 4 ]; do
+  pid=$(readlink "$PROFILE/lock" 2>/dev/null)
+  pid=${pid##*+}
+  if [ -n "$pid" ] && [ "$pid" != "$FIREFOX_PID" ] &&
+    case "$(readlink "/proc/$pid/exe" 2>/dev/null)" in "$APP"/firefox/*) true ;; *) false ;; esac; then
+    echo "Firefox restarted itself as pid $pid"
+    FIREFOX_PID=$pid
+    echo "$pid" >"$RUN/firefox.pid"
+    while kill -0 "$pid" 2>/dev/null; do sleep 1; done
+    looks=0
+  else
+    looks=$((looks + 1))
+    sleep 0.5
+  fi
+done

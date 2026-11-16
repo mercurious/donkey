@@ -25,6 +25,10 @@ user_pref("browser.startup.page", 3);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.aboutwelcome.enabled", false);
 user_pref("browser.startup.homepage_override.mstone", "ignore");
+// A handheld session often ends with Home or the power button mid-startup;
+// Firefox counts those as startup crashes and, after a few, restarts itself
+// to offer Troubleshoot Mode, a dialog no controller layout can answer.
+user_pref("toolkit.startup.max_resumed_crashes", -1);
 user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
 user_pref("browser.tabs.warnOnClose", false);
 user_pref("browser.toolbars.bookmarks.visibility", "never");
